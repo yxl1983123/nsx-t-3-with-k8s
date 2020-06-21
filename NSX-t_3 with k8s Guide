@@ -1,0 +1,547 @@
+![5687f1c3575842313dc8c1f0cc01b183.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p87)
+
+
+
+                                        Tony Yuan
+                                          
+
+
+本系列文章的目的是概述和解释NSX-T3.0通过声明式API去结合Kubernetes的控制平面。
+
+本环境使用了以下组件：
+* vCenter 7.0 (Build 16323968)
+* ESXi 7.0(Build 16324942)
+* NSX-T 3.0 (Build 15946738)
+* NSX Container Plugin 3.0.1(16118386)
+* CentOS 7.7
+* Docker CE 19.03.11
+* Kubernetes 1.18.3
+
+强烈建议检查以下参考资料以了解兼容性需求
+
+* VMware Product Interoperability Matrices
+https://www.vmware.com/resources/compatibility/sim/interop_matrix.php#interop&175=&2=&1=
+
+* NSX Container Plugin 3.0.1 Release Notes
+https://docs.vmware.com/en/VMware-NSX-T-Data-Center/3.0/rn/NSX-Container-Plugin-301-Release-Notes.html
+
+注意：NCP的发行说明中特别说明，关于Kubernetes的主机OS的版本支持，因此在安装Linux的版本的时候需要特别留意。
+![0dbcafc82ede5916601d9d532646f35c.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p86)
+
+#### 第一部分
+
+* 环境架构与描述
+* NSX-T正确配置状态
+
+##### 1.实验环境架构与描述
+本实验环境使用了2个VMware ESXi集群，第一个为管理集群，主要运行vCenter，NSX-T Manager以及NSX Edge Cluster；第二个集群为DC03-Cluster作为计算集群。
+<u>注意：本章节将不介绍管理集群的具体情况，主要重点在计算集群部分。</u>
+
+**计算集群采用4台服务器部署ESXi7.0**
+![203d3a90df10c95415d487c097c8b780.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p88)
+
+**由于是独立的实验环境，NSX-T的edge Transport Zone采用集群部署方式，命名:dc03-edge1和dc03-edge2**
+![98aa302a6b5277a6dc1ac8a26c8d27cb.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p89)
+
+**为dc03-edge1和dc03-edge2 创建了edge集群，名为dc03-edge-cluster1**
+![d449d9200b05d8751827820b342fe013.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p90)
+
+**NSX-T为整个计算集群做了主机准备**
+![ae50652373c6c78c8ab7407a082ecc9b.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p91)
+
+**四台主机做了NSX-T的主机准备，并承载了K8S集群VM**
+![907a9e057edcbe53d13a24c184ebc5b8.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p92)
+![e111302fbca655eabea52f8942e93d62.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p93)
+
+每个主机的网络连接在vCenter中显示如下：
+![687fc3aedbe8c3b4b4977a1c3a883db6.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p94)
+
+##### 2. NSX-T正确配置状态
+下图为NSX-T与K8S结合的逻辑网络图
+
+![a497896f39924364ab8c62bd30784804.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p95)
+
+* Tier0和Tier1运行在EdgeCluter上
+* Tier0在本实验环境配置active/active模式，通过EBGP的方式与外部网络连通
+* Tier1为K8S-node-mgmt-ls管理网络提供配置路由，并配置了Overlay 分段（segment）：k8s-node-mgmt-ls-10.11.2.0
+* ”k8s-tn-overlay“的Segment 作为传输层，用于K8S POd的连通，不需要连接任何T0和T1
+* k8s Node VM的第一个网卡连接到k8s-node-mgmt-ls的overlay Segment，第二个网卡连接到k8s-tn-overlay 的Segment，第1个网卡需要配置IP地址，第二个网卡不需要配置IP地址，只作为二层传输。
+
+NSX-T3.0的UI管理界面做了大的调整，从以前nsx-t2.4和2.5的多配置界面，全部进行统一集中。
+![fc06d0ffdf4271ea08f1762d0bc7d849.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p96)
+
+Tier0网关通过Segment（分段）：“dc03-uplink-4053”连接到外部网络，VLAN为4053，dc03-uplink-4053将在esxi的分布式交换机上创建端口组并设置VLAN ID标记
+![f63fd7db31be143bbb49e30dc60d115d.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p97)
+![73d6bcef7fc4f6b8a5a00102d0b8406c.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p98)
+
+Tier0:DC03-T0-VSK设置Edge集群：dc03-edge-cluster1
+![2c6d1143f37a23baa37dc15ef017e11a.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p99)
+
+之前为Tier0配置了uplink Segment:dc03-uplink-4053,连接到Tier0和EdgeCluster作为外部接口。
+![905822a07053ed58ce8b3b35e22d9fbe.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p100)
+![fcdef5df5686685749d4c7a9c2b9f4bb.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p101)
+
+Tier0 与物理网络设置BGP，当然可以根据现实的网络情况进行酌情处理。
+![480b53b88e79a13d42510abd047e0d53.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p102)
+![38ddb8e2f9e8cf0e440fc40085fcc4d6.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p103)
+
+Tier0可以将连接Tier1的子网，以及Tier0本身的子网做路由重分发
+![22e1e3960982876fec6a787c1c95a580.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p104)
+
+“k8s-node-mgmt-ls-10.11.2.0”作为k8s集群的管理使用，被分配给Tier1:dc03-t1-gateway,路由重分发，通知Tier0以及物理网络
+![101625122972194dc7bc2588a3a89497.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p105)
+
+![b8d1360313492acc02cc1fd874c19e1b.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p106)
+
+设置子网为10.11.2.0/24
+![89d7f7f5fe7dbb78e48a6860b44514b9.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p107)
+
+"k8s-tn-overlay"Segment将不连接任何Tier1和Tier0，传输区域为tz-overlay，不设置任何子网
+![60383864cad813e42430ab782ee9b636.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p108)
+
+##### **注意：本章节对NSX-T的基本概念和基本部署不做过多的描述，请查阅其他文档**
+
+#### 第二部分
+
+* NSX-T与K8S集成说明
+* K8S集群部署
+
+##### 1. NSX-T组件与K8S集成说明
+NCP3.0.1是NSX-T对接K8S平台的接口（NSX Container Plugin），NCP作为K8S和NSX-T 之间的桥梁，转换Kubernetes所需的状态和NSX-T配置。
+![0645bbd9a961653231c418ca67159730.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p109)
+
+当NCP启动时，它将检查Kubernetes资源和NSX-T对象，并填补它们之间的空白(协调)。NCP不只是提供容器网络，还提供Service 网络，Ingress，Egress网络。
+![7911da3542cfc9d137ff2ac43d3525f3.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p110)
+
+NSX Container Plugin 具备以下组件：
+
+* NCP: K8S POD方式部署，以单实例的方式运行在每个K8S Node上
+* NSX Node Agent: K8S DaemonSet方式部署，每个Node上运行一个NSX-Node-Agent POD
+* OpenvSwitch: OVS 运行在k8s node上，每个Node有需要运行
+* NSX CNI Plugin: 用于K8S与NSX-T集成，每个k8s node部署
+* NSX NCP Bootstrap: K8S DaemonSet方式部署，每个Node上运行一个NCP bootstrap POD
+![9ebf8cff562d765922f73a9ca9f7e273.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p111)
+![7b72a9ec2a5b3537da39c490cc031180.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p112)
+
+下图实验环境为NSX Container Plugin 与 K8S结合的拓扑图：
+![d502887c7b8284c52a31309a9e13bcb6.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p113)
+
+##### 2. K8S集群部署
+
+一、K8S环境情况
+
+| 主机名 | Docker版本 |K8S版本  |IP地址  | CentOS版本 |
+| --- | --- | --- | --- | --- |
+| k8s-m1 | 19.03.11 | 1.18.3 | 10.11.2.3 | 7.7 |
+| k8s-m2 | 19.03.11 | 1.18.3 | 10.11.2.4 | 7.7 |
+| k8s-m3 | 19.03.11 | 1.18.3 | 10.11.2.5 | 7.7 |
+| k8s-n1 | 19.03.11 | 1.18.3 | 10.11.2.6 | 7.7 |
+| k8s-n2 | 19.03.11 | 1.18.3 | 10.11.2.7 | 7.7 |
+| k8s-n3 | 19.03.11 | 1.18.3 | 10.11.2.8 | 7.7 |
+
+二、高可用架构
+本文采用kubeadm方式搭建高可用k8s集群，k8s集群的高可用实际是k8s各核心组件的高可用，这里使用主备模式，架构如下：![1e9bed9f73367de5ed35dd553fc57b9a.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p114)
+主备模式高可用架构说明：
+
+| 核心组件 | 高可用模式 | 高可用实现方式 |
+| --- | --- | --- |
+| apiserver | 主备 | keepalived |
+| controller-manager |主备  |leader election  |
+| scheduler | 主备 |leader election  |
+| etcd | 主备 | kubeadm |
+![cb385acf4bc06b427315b41f52ce0716.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p115)
+
+注意：在所有节点进行如下操作
+1.设置主机名hostname，管理节点设置主机名为k8s-master。
+hostnamectl set - hostname k8s-master
+需要设置其他主机名称时，可将k8s-master替换为正确的主机名k8s-node01，k8s-node02即可。
+2.编辑/ etc / hosts文件，添加域名解析。
+cat << EOF >> / etc / hosts
+10.11.2.3 k8s-m1
+10.11.2.4 k8s-m2
+10.11.2.5 k8s-m3
+10.11.2.6 k8s-n1
+10.11.2.7 k8s-n2
+10.11.2.8 k8s-n3
+EOF
+3.关闭防火墙，SELinux的和交换。
+systemctl stop firewalld
+systemctl disable firewalld
+setenforce 0
+sed -i "s/^SELINUX=enforcing/SELINUX=disabled/g" /etc/selinux/config
+swapoff -a
+sed -i 's/.swap./#&/' /etc/fstab
+4.配置内核参数，将桥接的IPv4流量传递到iptables的链
+cat > /etc/sysctl.d/k8s.conf <<EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+sysctl --system
+5.配置国内yum源
+yum install -y wget
+mkdir /etc/yum.repos.d/bak && mv /etc/yum.repos.d/*.repo /etc/yum.repos.d/bak
+wget -O /etc/yum.repos.d/CentOS-Base.repo http://mirrors.cloud.tencent.com/repo/centos7_base.repo
+wget -O /etc/yum.repos.d/epel.repo http://mirrors.cloud.tencent.com/repo/epel-7.repo
+yum clean all && yum makecache
+配置国内Kubernetes源
+cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://mirrors.aliyun.com/kubernetes/yum/repos/kubernetes-el7-x86_64/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg https://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
+EOF
+配置 docker 源
+wget https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo -O /etc/yum.repos.d/docker-ce.repo
+
+更新缓存
+yum clean all
+yum -y makecache
+
+6. Master Node做免密登录
+配置k8s-m1,k8s-m2,k8s-m3免密登录，本步骤只在k8s-m1上执行
+[root@k8s-m1 ~]# ssh-keygen -t rsa
+![51564eb3828e9a34c7a0bc7b98ffe255.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p116)
+
+将秘钥同步到k8s-m2和k8s-m3
+[root@k8s-m1 ~]# ssh-copy-id -i /root/.ssh/id_rsa.pub root@10.11.2.4
+[root@k8s-m1 ~]# ssh-copy-id -i /root/.ssh/id_rsa.pub root@10.11.2.5
+这样k8s-m1可以直接登录k8s-m2和k8s-m3，不需要输入密码。
+
+7. Docker安装
+安装依赖包
+yum install -y yum-utils   device-mapper-persistent-data   lvm2
+安装Docker CE
+yum install -y docker-ce
+如果要安装指定版本的话：
+类似：yum install docker-ce-18.09.9 docker-ce-cli-18.09.9 containerd.io -y
+启动Docker
+systemctl start docker
+systemctl enable docker
+
+8. 命令补全
+yum install -y readline bash-completion
+kubectl completion bash >> /etc/profile.d/kubectl.sh
+chmod +x  /etc/profile.d/kubectl.sh
+ bash
+source <(kubectl completion bash)
+
+9. keepalived 安装
+Master节点全部执行本步骤操作
+
+安装keepaliveed
+yum -y install keepalived
+
+keepalived配置
+
+k8s-m1上keepalived配置：
+vi /etc/keepalived/keepalived.conf 
+
+! Configuration File for keepalived
+global_defs {
+   router_id k8s-m1
+}
+vrrp_instance VI_1 {
+    state MASTER 
+    interface ens160
+    virtual_router_id 50
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        10.11.2.9
+    }
+}
+![fa95a519a1ed7c2eb5acc36f51181e11.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p117)
+
+
+k8s-m2上keepalived配置：
+vi /etc/keepalived/keepalived.conf 
+! Configuration File for keepalived
+global_defs {
+   router_id k8s-m2
+}
+vrrp_instance VI_1 {
+    state BACKUP 
+    interface ens160
+    virtual_router_id 50
+    priority 90
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        10.11.2.9
+    }
+}
+
+![548f8efa52d55ff256f93b29669ddb36.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p119)
+
+k8s-m3上keepalived配置：
+vi /etc/keepalived/keepalived.conf 
+! Configuration File for keepalived
+global_defs {
+   router_id k8s-m3
+}
+vrrp_instance VI_1 {
+    state BACKUP 
+    interface ens160
+    virtual_router_id 50
+    priority 80
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        10.11.2.9
+    }
+}
+![fe95c6eec593dc3fc29fdf430cfab7f5.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p120)
+
+启动 Keepalived
+service keepalived start
+systemctl enable keepalived
+
+查看k8s-m1的VIP情况
+ip a
+
+10. K8S安装
+安装kubelet、kubeadm和kubectl
+yum install -y kubectl kubelet kubeadm
+启动kubelet
+[root@k8s-m1 ~]# systemctl enable kubelet && systemctl start kubelet
+
+11. 初始化Master
+k8s-m1上执行本部分操作
+创建一个kubeadm-config.yaml文件
+vi kubeadm-config.yaml
+
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+kubernetesVersion: v1.18.3
+apiServer:
+  certSANs:    #填写所有kube-apiserver节点的hostname、IP、VIP
+  - k8s-m1
+  - k8s-m2
+  - k8s-m3
+  - k8s-n1
+  - k8s-n2
+  - k8s-n3
+  - 10.11.2.3
+  - 10.11.2.4
+  - 10.11.2.5
+  - 10.11.2.6
+  - 10.11.2.7
+  - 10.11.2.8
+  - 10.11.2.9
+controlPlaneEndpoint: "10.11.2.9:6443"
+![e71610a04e0f9f964f1536428da670e3.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p121)
+
+master 初始化
+kubeadm init --config=kubeadm-config.yaml
+
+记录kubeadm join的输出，后面需要这个命令将work节点和其他control plane节点加入集群中
+You can now join any number of control-plane nodes by copying certificate authorities
+and service account keys on each node and then running the following as root:
+
+  kubeadm join 10.11.2.9:6443 --token x7nbl6.5tnuh51vny666jal \
+    --discovery-token-ca-cert-hash sha256:b5f2e31cf4266eacf88b55452ce78d83be69a206ab6a8966d012cb6d74275685 \
+    --control-plane
+
+Then you can join any number of worker nodes by running the following on each as root:
+
+kubeadm join 10.11.2.9:6443 --token x7nbl6.5tnuh51vny666jal \
+    --discovery-token-ca-cert-hash sha256:b5f2e31cf4266eacf88b55452ce78d83be69a206ab6a8966d012cb6d74275685
+    
+加载环境变量
+mkdir -p $HOME/.kube
+cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+chown $(id -u):$(id -g) $HOME/.kube/config
+
+具体K8S集群部署可以参考一下文章：
+https://www.kubernetes.org.cn/6632.html
+#### 第三部分
+
+* 为K8S配置NSX-T对象
+* 为K8S配置NCP Yaml文件
+
+##### 为K8S配置NSX-T对象
+本章节中，K8S所有节点的第二个网卡所连接到的"k8s-tn-overlay“的Segment上的端口将配置特定作用域“ncp/cluster”、“ncp/node_name”，针对不同master和worker打上特定标签。
+
+登录NSX manager，选择”网络“-”分段“，选择名为”k8s-tn-overlay“的分段名进行编辑：
+![a8a33486033a7dfe48fdd6cfca5cd42b.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p122)
+
+上图的中显示为”6"个端口，针对这6个端口进行一一编辑
+![1513b456da5f27c200b231d09efea096.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p123)
+
+按照以下截图进行配置标签
+![1b4bcd9042d5fb82f1642b0a498d6b1a.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p124)
+![b38b1f3f2217fed9584ea979ffaaa20c.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p125)
+![35336ac8bc5f6ffe3908d4ae574b006b.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p126)
+![1a7bfa6bf12d538884887be913248da2.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p127)
+![0d592fcfcac37ac1e869f2f6b917e8eb.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p128)
+![6cfcf4238b8681275d4ba93eb1686144.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p129)
+
+配置IP Pool 和 IP Blocks
+![18ad2272d19cd823d73cda07bb1b49c9.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p130)
+
+登录NSX manager，选择”网络“-”IP地址池-IP地址池“，配置一个IP地址池“K8S-LB-POOL”，这个池将用于k8S Ingress的IP地址分配，或则用于K8S Service的类型 LoadBalance.
+![c81e347540ff27932c1f6ce5064f0145.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p131)
+![858e2e8b531b6b3a0bf3a9d3d82d72bb.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p132)
+
+登录NSX manager，选择”网络“-”IP地址池-IP地址池“，配置一个IP地址池“K8S-NAT-POOL”，这个池将用于namespace中的K8S Pods的SNAT，对于每个namespace，将从这个池中选择一个单独的SNAT IP。
+![83fa3771e6e24a3e11b51c3cfe6d3458.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p133)
+![fe47eebb0d8df9a59a5dbe59197c38c8.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p134)
+
+登录NSX manager，选择”网络“-”IP地址池-IP地址块“，配置两个IP地址块。
+![104a6377d1b4d6dec6449afd991a30a7.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p135)
+“k8s-pod-ip-block"提供为一个/16子网(k8s-pod-ip-block-172.21.0.0/16),每当开发人员创建一个新的K8S名称空间时，这个IP块将被/24块分割出来，并且在NSX-T中自动创建一个基于/24子网的IP池,基于/24子网的IP池将被分配到相应的名称空间，每当在该名称空间中创建Pods时，每个POD将从该/24子网中选择一个IP地址,从“k8s-pod-IP-block”中获取IP地址的每个名称空间都将被SNAT指向到前面配置的“K8S-NAT-POOL”中选择的IP地址。
+
+“K8S-NO-NAT-IP-BLOCK”也提供为/16子网(“K8S-NO-NAT-IP-BLOCK”- 172.22.0.0/16)，顾名思义，这个IP块也用于namespace，但是不做SNAT.当一个开发人员创建一个新的k8s namespace,yaml文件设置 ” ncp/no_snat: "true" ",在nsx-t上自动从这个ip块中生成一个/24的子网IP,基于这个/24子网将被分配给namespace，每当在该名称空间中创建Pods时，每个POD将从该/24子网中选择一个IP地址。
+
+获取 NSX-T对象名称
+在这个步骤中，需要捕获和记录K8S将使用的NSX-T对象的对象UUID。为此，需要做的是在NSX-T UI中单击各自对象左边的三个点，并选择“将路径复制到剪贴板”。此操作复制可以在其中找到对象UUID的对象的整个API路径。
+![6b2a95c5e9870279ba84737057e8f9f8.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p136)
+当选择“将路径复制到剪贴板”并将内容粘贴到一个记事本文件时，在这个实验室中输出如下:>“/infra/tier-0s/DC03-T0-VSKS”。这意味着对象UUID为“DC03-T0-VSKS”。注意，对于策略API, UUID在大多数情况下是对象名称本身。
+重要提示:如果NSX-T对象稍后被重命名，对象UUID仍将与创建对象时指定的相同。因此，如上所示的重复检查UUID是一项重要的任务。
+
+对所有IP地址池、IP地址块、防火墙部分重复上述步骤，并注意对象UUID，因为数据将在NCP Yaml配置文件中使用(对于防火墙部分，UUID将是一长串字符和数字)
+
+##### 为K8S配置NCP Yaml文件
+下载NCP组件
+https://my.vmware.com/en/web/vmware/info/slug/networking_security/vmware_nsx_t_data_center/3_x#drivers_tools
+![60b6e43ee488fcc6155322d10503120f.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p137)
+
+下载完ZIP,解压缩开来
+![343e118fa3b337cd0d1015ba61df531d.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p138)
+![4f0569923225ebf7f30af97ed1cdeb3f.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p139)
+Kubernetes:这个文件夹包含RHEL和Ubuntu操作系统的统一清单文件(Yaml)和容器映像(.tar)。同样的容器映像用于NSX节点代理、NSX Kube代理、NSX OVS和NSX虚拟容器。
+本次操作采用Centos，为k8s node的host操作系统,所以ncp-rhel.yaml和nsx-ncp-rhel-3.0.1.16118386.tar两个文件将被用到。
+
+
+配置NCP-rhel.yaml文件
+具体参考请参考修改好的模板
+https://github.com/yxl1983123/nsx-t-3-with-k8s/blob/master/ncp-rhel-tyuan.yaml
+以下为修改大致参数列表：
+cluster = 
+apiserver_host_ip = 
+apiserver_host_port = 6443
+nsx_api_user = admin
+nsx_api_password = VMware1!VMware1!
+nsx_api_managers = 
+insecure = True
+overlay_tz = b9b8a3ed-6da6-4010-b57d-cf77431a1c77
+container_ip_blocks = k8s-nat-pod-ipb
+no_snat_ip_blocks = k8s-no-nat-ipb
+external_ip_blocks = k8s-egress-ipb
+top_tier_router = k8s-t1（设置T0的UUID)
+external_ip_pools_lb  = k8s-ingress-ipp
+external_ip_pools = k8s-egress-ipp
+single_tier_topology = True
+edge_cluster = 165b48b1-e822-4413-b07f-122da094efa2
+enable_ncp_event = True
+ovs_uplink_port = ens224
+
+#### 第四部分
+
+* 为K8S集群部署NSX-T组件
+* 创建Namespace和Pod测试NSX-T
+
+##### 为K8S集群部署NSX-T
+
+1. 复制 nsx-ncp-rhel-3.0.1.16118386.tar到每个K8S Node上，这个文件是容器映像文件，用于NSX节点代理Pod和NSX NCP Bootstracp Pod中的容器。
+2. 在每个K8S Node上执行 docker load -i nsx-ncp-rhel-3.0.1.16118386.tar
+3. 在每个K8S节点上，通过运行“sudo docker tag registration .local/3.0.1.16118386/nsx-ncp-rhel:latest nsx-ncp:latest”来标记image,这是必须的操作。因为NCP-rhel.yaml文件中使用的容器 images名为nsx-ncp, 运行docker images来查看images的命名情况。
+![d544ce1ed5d202dcd67b8ee7f7517a41.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p140)
+4. 在运行VIP地址的Master node上运行NCP-rhel.yaml文件：kubectl apply -f NCP-rhel.yaml,会创建namespace:nsx-system,创建service accounts 和cluster rules,创建NCP deployment ，NSX NCP Bootstracp daemonset, NSX Node Agent daemonset.
+![e1822425081f2f980ab972f9876f2484.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p141)
+
+现在NSX-T3.0与K8S集成全部完成，接下来我们查看一下NSX-T的一些自动设置变化：
+
+每个K8S系统默认的namespace，自动创建segment
+![beae672ddef7e7cf4272fd06fe165518.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p142)
+
+每个K8S名称空间的IP池/地址空间自动从各自的IP块中分离出来。
+![7f28cd1d6115f41dde4bd03672e03f45.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p143)
+
+提供一个新的负载均衡器并附加到Tier 1层网关。
+![76c684a86d9cf8c80abab8f4bc696b14.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p144)
+
+VIP的K8S ingress(7层 LB)是自动提供。VIP的IP地址自动从“K8S-LB-POOL”中选取。
+![30a95f835f8db67449761455b1cfb036.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p145)
+
+##### 创建Namespace和Pod测试NSX-T
+创建Namespace
+
+kubectl create namespace tyuan
+![50c79db56ff7ae1da8e6c673150e12fd.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p146)
+
+NSX-T 通过NCP获取到K8S的变化，自动为这个namepsace创建Tier1 和 Segment
+![94a2755bdd1ae08a55650ac7dfa22823.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p147)
+![c44fd362c841342859c25098d989e545.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p148)
+![8e730d9b45fd7d3fd4da481ea9ee4413.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p149)
+
+**部署 POD容器**
+大家可以参考很多网上的Yaml进行部署测试，这里部署一个hello-kubernetes的测试应用。
+
+hello-kubernetes.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-kubernetes-service
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: hello-kubernetes
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-kubernetes
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hello-kubernetes
+  template:
+    metadata:
+      labels:
+        app: hello-kubernetes
+    spec:
+      containers:
+      - name: hello-kubernetes
+        image: paulbouwer/hello-kubernetes:1.5
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+
+kubectl apply -f hello-kubernetes.yaml -n tyuan
+![9821f2adc5d5edbb7f7c9ce404f057e5.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p150)
+![701cac766a7b55392d209091d67d9f18.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p151)
+
+NSX-T 自动创建了虚拟服务器
+![5fddf02624483abd315470fc4e0b7c03.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p152)
+
+创建的Pod自动添加到tyuan这个namespace的segment上
+![26a4db7d1048e91773f1dda71a3e9da1.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p153)
+![d0dad1e9343fe0b75b1157ebb3ea82ff.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p154)
+
+
+接下来我们来访问以下这个Hello-kubernetes的虚拟化服务器10.11.1.5，是否可以访问这个应用。
+![724d7788c3baa9cd9a5ba4ff6bd73544.png](evernotecid://2C67E71C-5F23-4ABD-884E-307CA8D7502E/appyinxiangcom/25130671/ENResource/p155)
+
+
+至此，NSX-T3.0与原生K8S集群集成介绍完毕！！！
+
